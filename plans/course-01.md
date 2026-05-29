@@ -26,8 +26,8 @@
 具体内容：
 - 学习 CUDA 编程模型：grid、block、thread 三级层级结构。
 - 学习 `__global__` 函数的声明和 `<<<grid, block>>>` 的调用语法。
-- 学习 GPU 内存管理：cudaMalloc 分配、cudaMemcpy 拷贝（H2D / D2H）、cudaFree 释放。
 - 实现 vector_add kernel：每个线程计算一个元素 `c[i] = a[i] + b[i]`。
+- 通过 torch::Tensor 管理 GPU 内存（分配、data_ptr 取指针、返回结果）。
 - 写一个带 main() 的独立可执行文件，用 CMake 编译运行，打印结果验证正确性。
 
 产出：csrc/vector_add.cu + CMakeLists.txt，能编译运行。
@@ -84,9 +84,9 @@
 
 ## 验收标准
 
-- [ ] 能独立编写 CMakeLists.txt 并用 cmake + make 编译出 CUDA 可执行文件。
-- [ ] 能解释 grid/block/thread 三级层级的含义和索引计算方式。
-- [ ] 能解释 grid-stride loop 的作用及为什么需要它。
-- [ ] 能用 `pip install -e .` 编译项目，在 Python 中 `from minicuda import vector_add` 调用。
-- [ ] vector_add 在 Python 中与 `torch.add` 结果 allclose（fp32 下 atol=1e-6）。
-- [ ] 理解 setup.py (CUDAExtension) 与 CMake 两种构建方式的区别和各自适用场景。
+- [x] 能独立编写 CMakeLists.txt 并用 cmake + make 编译出 CUDA 可执行文件。
+- [x] 能解释 grid/block/thread 三级层级的含义和索引计算方式。
+- [x] 能解释 grid-stride loop 的作用及为什么需要它。
+- [x] 能用 `pip install -e .` 编译项目，在 Python 中 `from minicuda import xxx` 调用。
+- [x] 所有 kernel（vector_add / saxpy / matrix_add）的 Python 单测通过，与 PyTorch 参考实现 allclose（fp32, atol=1e-6）。
+- [x] 理解 setup.py (CUDAExtension) 与 CMake 两种构建方式的区别和各自适用场景。

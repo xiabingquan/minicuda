@@ -197,3 +197,64 @@ from minicuda._stubs.matmul_ops import matmul
 ```
 
 `_stubs/` 没有 `__init__.py`，运行时不存在，纯粹是给类型检查器组织代码用。
+
+# 2. vector_add — 最简 kernel
+
+每个 thread 处理一个元素，全局索引 `idx = blockDim.x * blockIdx.x + threadIdx.x`。grid 开到足够大，用 `if (idx < n)` 守卫边界。
+
+关键点：
+- `__global__` 函数返回值必须为 void，输出通过指针参数写入。
+- `<<<grid_size, block_size>>>` 是 CUDA 独有的 kernel 启动语法，指定 grid 和 block 的尺寸。
+- `block_size` 常取 256（warp 大小 32 的整数倍），`grid_size = (n + block_size - 1) / block_size` 保证覆盖所有元素。
+
+## 内置变量速查
+
+| 变量 | 含义 |
+|---|---|
+| `blockDim.x` | 一个 block 中的 thread 数 |
+| `gridDim.x` | grid 中的 block 数 |
+| `blockIdx.x` | 当前 block 在 grid 中的编号 |
+| `threadIdx.x` | 当前 thread 在 block 中的编号 |
+
+`Dim` = 尺寸，`Idx` = 索引。2D/3D 时还有 `.y` `.z` 分量。
+
+# 3. saxpy — grid-stride loop
+
+`z = a * x + y`。固定 grid 大小（如 8 blocks × 256 threads = 2048 threads），每个 thread 用循环处理多个元素：
+
+```cuda
+int idx = blockDim.x * blockIdx.x + threadIdx.x;
+int stride = gridDim.x * blockDim.x;  // 总 thread 数
+for (int i = idx; i < n; i += stride) {
+    z[i] = a * x[i] + y[i];
+}
+```
+
+关键点：
+- stride = 总 thread 数 = `gridDim.x * blockDim.x`，不要和 block 数搞混。
+- 好处：问题规模与 grid 大小解耦，grid 可以按 SM 数量精细调优。
+- vector_add 那种"开大 grid + 每 thread 一元素"也完全正确，grid-stride loop 只是另一种策略。
+
+# 4. matrix_add — 2D grid 与 2D block
+
+二维矩阵逐元素加法，grid 和 block 都配置为 2D：
+
+```cuda
+dim3 block(16, 16);        // 每 block 256 threads
+dim3 grid((cols + 15) / 16, (rows + 15) / 16);
+
+int col = blockDim.x * blockIdx.x + threadIdx.x;
+int row = blockDim.y * blockIdx.y + threadIdx.y;
+int offset = row * cols + col;  // 行优先: 二维坐标 → 一维地址
+```
+
+关键点：
+- **grid 是对计算任务的描述**：grid 的形状对应问题的形状。一维数组用 1D grid，二维矩阵用 2D grid，三维体素用 3D grid。grid/block 的配置本质上是在告诉 GPU "我的任务长什么样、怎么分配给 thread"。
+- GPU 显存是一维线性的，二维索引必须手动换算为一维偏移 `row * cols + col`。
+- grid 开得足够大就不需要循环，用 `if (row < rows && col < cols)` 排除越界 thread。
+- `dim3` 固定三个字段 `.x .y .z`，不用的维度默认为 1。
+- grid 上限极大（x 方向 2^31-1，y/z 方向 65535），正常矩阵不会越界。
+
+## 2D thread 分布示意
+
+![2D thread 分布](../assets/2d_thread_layout.excalidraw)
