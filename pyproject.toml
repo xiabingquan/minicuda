@@ -1,0 +1,35 @@
+[project]
+name = "minicuda"
+version = "0.1.0.dev0"
+description = "CUDA learning kernels with PyTorch bindings"
+requires-python = "==3.12.*"
+dependencies = [
+    "torch==2.10.0+cu132",
+    "numpy>=2.4.2",
+]
+
+[build-system]
+requires = ["setuptools", "torch==2.10.0+cu132"]
+build-backend = "setuptools.build_meta"
+
+[[tool.uv.index]]
+name = "mi-pypi"
+url = "https://pkgs.d.xiaomi.net/artifactory/api/pypi/pypi-virtual/simple"
+default = true
+
+[[tool.uv.index]]
+name = "mimo-core-pypi"
+url = "https://artifactory.d.xiaomi.net/artifactory/api/pypi/mimo-core-pypi-local/simple"
+explicit = true
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "mimo-core-pypi" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ipython>=9.13.0",
+]

@@ -1,0 +1,11 @@
+build/
+cmake-build-*/
+*.egg-info/
+dist/
+*.so
+*.o
+*.pyc
+__pycache__/
+.idea/
+.venv/
+.vscode/
