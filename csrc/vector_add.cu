@@ -21,7 +21,8 @@ torch::Tensor vector_add(torch::Tensor a, torch::Tensor b) {
   int grid_size = (len + block_size - 1) / block_size;
 
   vector_add_kernel<<<grid_size, block_size>>>(
-      a.data_ptr<float>(), b.data_ptr<float>(), c.data_ptr<float>(), len);
+    a.data_ptr<float>(), b.data_ptr<float>(), c.data_ptr<float>(), len
+  );
 
   return c;
 }

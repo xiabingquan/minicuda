@@ -3,7 +3,7 @@ from minicuda import vector_add
 
 
 def test_vector_add_basic():
-    """基本功能测试: 结果与 torch.add 对齐。"""
+    """Basic test: result should match torch.add."""
     a = torch.randn(1024, device="cuda")
     b = torch.randn(1024, device="cuda")
     c = vector_add(a, b)
@@ -11,7 +11,7 @@ def test_vector_add_basic():
 
 
 def test_vector_add_large():
-    """大尺寸测试: 验证 grid 能正确覆盖所有元素。"""
+    """Large size test: grid should cover all elements."""
     n = 1_000_000
     a = torch.randn(n, device="cuda")
     b = torch.randn(n, device="cuda")
@@ -20,7 +20,7 @@ def test_vector_add_large():
 
 
 def test_vector_add_non_aligned():
-    """非对齐长度测试: 长度不是 block_size 的整数倍。"""
+    """Non-aligned length test: length is not a multiple of block_size."""
     n = 999
     a = torch.randn(n, device="cuda")
     b = torch.randn(n, device="cuda")
@@ -29,7 +29,7 @@ def test_vector_add_non_aligned():
 
 
 def test_vector_add_multidim():
-    """多维张量测试: 虽然 kernel 按一维处理, 但 numel() 应正确覆盖。"""
+    """Multi-dim tensor test: kernel treats it as 1D via numel()."""
     a = torch.randn(32, 64, device="cuda")
     b = torch.randn(32, 64, device="cuda")
     c = vector_add(a, b)
