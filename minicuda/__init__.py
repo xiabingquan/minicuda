@@ -1,3 +1,3 @@
-from minicuda._C import vector_add, saxpy
+from minicuda._C import vector_add, saxpy, matrix_add
 
-__all__ = ["vector_add", "saxpy"]
+__all__ = ["vector_add", "saxpy", "matrix_add"]
