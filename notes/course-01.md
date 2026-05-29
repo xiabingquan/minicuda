@@ -257,4 +257,48 @@ int offset = row * cols + col;  // 行优先: 二维坐标 → 一维地址
 
 ## 2D thread 分布示意
 
-![2D thread 分布](../assets/2d_thread_layout.excalidraw)
+![2D thread 分布](../assets/2d_thread_layout.svg)
+
+# 5. rgb_to_grayscale — 多通道数据处理
+
+将 CHW 格式的 RGB 图像转为单通道灰度图：`gray = 0.299*R + 0.587*G + 0.114*B`。
+
+## CHW 内存布局
+
+PyTorch 默认图像格式是 CHW（Channel-Height-Width），三个通道在内存中是**连续平面**排列：
+
+```
+内存: [R_plane (H×W)] [G_plane (H×W)] [B_plane (H×W)]
+偏移: R[offset]        G[H*W + offset]  B[2*H*W + offset]
+```
+
+对于某个像素 `(i, j)`，线性偏移 `offset = i * W + j`，三通道分别在 `offset`、`H*W + offset`、`2*H*W + offset`。
+
+## CHW vs HWC
+
+| 格式 | 排列方式 | 使用者 |
+|---|---|---|
+| CHW | 同通道像素连续 | PyTorch 默认 |
+| HWC | 同像素通道连续 | OpenCV、图片文件默认 |
+
+CHW 对 GPU 更友好：同 warp 内 thread 访问同一通道的连续像素，满足 memory coalescing。HWC 下同 warp 访问的是不同通道数据，地址跨步为 3。
+
+## Kernel 设计
+
+每个 thread 处理一个像素，2D grid 覆盖 H×W 平面。输入 shape `(3, H, W)`，输出 shape `(H, W)`：
+
+```cuda
+int i = blockDim.x * blockIdx.x + threadIdx.x;  // row
+int j = blockDim.y * blockIdx.y + threadIdx.y;  // col
+int offset = i * W + j;
+if (i < H && j < W) {
+    out[offset] = 0.299f * inp[offset]
+                + 0.587f * inp[H*W + offset]
+                + 0.114f * inp[2*H*W + offset];
+}
+```
+
+关键点：
+- 输入必须 contiguous，否则 `data_ptr` 取出的指针不对应 CHW 平面布局。
+- 边界检查用 `i < H && j < W`，不要用 `offset < H*W`（后者在越界 thread 的 j 溢出时可能误命中其他行的 offset）。
+- 系数 0.299 + 0.587 + 0.114 = 1.0，纯白输入输出仍为 1.0。

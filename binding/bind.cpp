@@ -3,6 +3,7 @@
 torch::Tensor vector_add(torch::Tensor a, torch::Tensor b);
 torch::Tensor saxpy(torch::Tensor x, torch::Tensor y, float a);
 torch::Tensor matrix_add(torch::Tensor a, torch::Tensor b);
+torch::Tensor rgb_to_grayscale(torch::Tensor inp);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
@@ -12,4 +13,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
             py::arg("x"), py::arg("y"), py::arg("a"));
       m.def("matrix_add", &matrix_add, "Element-wise matrix addition (CUDA)",
             py::arg("a"), py::arg("b"));
+      m.def("rgb_to_grayscale", &rgb_to_grayscale, "RGB to grayscale conversion (CUDA)",
+            py::arg("inp"));
 }

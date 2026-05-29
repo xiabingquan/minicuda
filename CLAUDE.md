@@ -35,3 +35,8 @@
 - Commit message 简洁说明实现了什么、用了什么优化技巧。
 - 课程笔记不需要"Course XX 笔记"这类顶层标题，直接从具体内容的一级标题开始。
 - 课程笔记中一级标题表示一个独立的知识板块，必须带数字编号（如"# 1. 如何将 CUDA 仓库导出 Python 包并调用"）。
+
+## Excalidraw 规范
+
+- 默认文本使用 Excalifont（fontFamily: 8）。
+- 代码/等宽文本使用 Monospace（fontFamily: 5）。
