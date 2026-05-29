@@ -15,6 +15,7 @@
 - 理解 nvcc 编译 .cu、g++ 编译 .cpp、链接生成 .so、Python dlopen 加载 .so 的完整链路。
 - 理解 `pip install -e .` 开发模式和 `pip install .` 正式安装的区别。
 - 理解 minicuda/_C 与 minicuda/__init__.py 的关系。
+- 理解类型标注机制：为什么需要 .pyi stub 文件、文件命名约束（必须与模块名一致）、为什么用显式 import 而非 `import *`（类型检查器对 .so 不可读，无法展开 `*`）、大型 stub 如何拆分到 stub-only 子目录。
 
 产出：将构建流程整理为笔记，写入 notes/course-01.md。
 
@@ -25,22 +26,24 @@
 具体内容：
 - 学习 CUDA 编程模型：grid、block、thread 三级层级结构。
 - 学习 `__global__` 函数的声明和 `<<<grid, block>>>` 的调用语法。
-- 学习 GPU 内存管理：cudaMalloc 分配、cudaMemcpy 拷贝（H2D / D2H）、cudaFree 释放。
 - 实现 vector_add kernel：每个线程计算一个元素 `c[i] = a[i] + b[i]`。
+- 通过 torch::Tensor 管理 GPU 内存（分配、data_ptr 取指针、返回结果）。
 - 写一个带 main() 的独立可执行文件，用 CMake 编译运行，打印结果验证正确性。
 
-产出：csrc/vector_add/vector_add.cu + CMakeLists.txt，能编译运行。
+产出：csrc/vector_add.cu + CMakeLists.txt，能编译运行。
 
 ### Step 3: 编写 saxpy kernel
 
 在 vector_add 的基础上增加标量参数，学习 grid-stride loop 模式。
+
+学习目的：vector_add 中每个 thread 只处理一个元素，grid 大小必须 >= 元素数量。grid-stride loop 让固定数量的 thread 循环处理多个元素，将问题规模与 grid 大小解耦，是生产代码的标准写法。
 
 具体内容：
 - 实现 y = a * x + y，kernel 接收标量参数 a 和指针参数 x, y。
 - 学习 grid-stride loop：`for (int i = idx; i < n; i += stride)`，使一个 kernel 能处理任意长度输入，不受 grid 大小限制。
 - 对比有无 grid-stride loop 的区别：不用 loop 时，thread 数必须 >= 元素数。
 
-产出：csrc/saxpy/saxpy.cu，能处理任意长度输入。
+产出：csrc/saxpy.cu，能处理任意长度输入。
 
 ### Step 4: 编写 matrix_add kernel
 
@@ -53,7 +56,7 @@
 - 理解行优先存储下二维索引到一维地址的映射：`offset = row * width + col`。
 - 处理矩阵尺寸不是 block 大小整数倍的边界情况。
 
-产出：csrc/matrix_add/matrix_add.cu，支持任意大小矩阵。
+产出：csrc/matrix_add.cu，支持任意大小矩阵。
 
 ### Step 5: 编写 rgb_to_grayscale kernel
 
@@ -65,7 +68,7 @@
 - 每个线程处理一个像素，从 3 个通道读取 RGB 值，写出 1 个灰度值。
 - （可选）了解 pitch memory：cudaMallocPitch 分配对齐内存以提高访存效率。
 
-产出：csrc/rgb_to_grayscale/rgb_to_grayscale.cu。
+产出：csrc/rgb_to_grayscale.cu。
 
 ### Step 6: 将 kernel 导出为 Python/PyTorch 模块
 
@@ -81,9 +84,9 @@
 
 ## 验收标准
 
-- [ ] 能独立编写 CMakeLists.txt 并用 cmake + make 编译出 CUDA 可执行文件。
-- [ ] 能解释 grid/block/thread 三级层级的含义和索引计算方式。
-- [ ] 能解释 grid-stride loop 的作用及为什么需要它。
-- [ ] 能用 `pip install -e .` 编译项目，在 Python 中 `from minicuda import vector_add` 调用。
-- [ ] vector_add 在 Python 中与 `torch.add` 结果 allclose（fp32 下 atol=1e-6）。
-- [ ] 理解 setup.py (CUDAExtension) 与 CMake 两种构建方式的区别和各自适用场景。
+- [x] 能独立编写 CMakeLists.txt 并用 cmake + make 编译出 CUDA 可执行文件。
+- [x] 能解释 grid/block/thread 三级层级的含义和索引计算方式。
+- [x] 能解释 grid-stride loop 的作用及为什么需要它。
+- [x] 能用 `pip install -e .` 编译项目，在 Python 中 `from minicuda import xxx` 调用。
+- [x] 所有 kernel（vector_add / saxpy / matrix_add）的 Python 单测通过，与 PyTorch 参考实现 allclose（fp32, atol=1e-6）。
+- [x] 理解 setup.py (CUDAExtension) 与 CMake 两种构建方式的区别和各自适用场景。
