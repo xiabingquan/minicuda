@@ -44,10 +44,12 @@
 
 ### 学习目标
 
-理解 GPU 内存层级（global -> shared -> register），掌握 memory coalescing 和 bank conflict 的概念，能编写使用 shared memory 的 kernel。通过矩阵转置和矩阵乘法两个经典问题，体会内存访问模式对性能的决定性影响。
+理解 GPU 内存层级（global -> shared -> register），掌握 CUDA 原生内存管理 API（含异步执行与 stream），理解 memory coalescing 和 bank conflict 的概念，能编写使用 shared memory 的 kernel。通过矩阵转置和矩阵乘法两个经典问题，体会内存访问模式对性能的决定性影响。
 
 ### 知识点
 
+- CUDA 原生内存管理：cudaMalloc / cudaMemcpy / cudaFree / cudaMemset。
+- 异步执行：cudaMallocHost (pinned memory)、cudaMemcpyAsync、cudaStream_t、H2D/kernel/D2H 流水线重叠。
 - GPU 内存层级：global memory、shared memory、register、L1/L2 cache 的容量和延迟。
 - Memory coalescing（合并访存）：连续线程访问连续地址。
 - Shared memory 与 bank conflict：32 bank 结构、padding 解决方案。
@@ -59,16 +61,20 @@
 
 | 序号 | Kernel | 概述 | 知识点 |
 |------|--------|------|--------|
-| 1 | matrix_transpose_naive | 朴素矩阵转置，直接读写 global memory | 非合并访存的性能影响, 行优先 vs 列优先 |
-| 2 | matrix_transpose_smem | 使用 shared memory 中转的矩阵转置 | shared memory 声明和使用, bank conflict 及 padding |
-| 3 | dot_product | 两个向量的点积运算 | shared memory 实现 block 内 reduce, __syncthreads 同步 |
-| 4 | gemv | 矩阵与向量相乘 | 行访问 vs 列访问模式的性能差异 |
-| 5 | sgemm_naive | 最朴素的 FP32 矩阵乘 | GEMM 基本实现逻辑, GFLOPS 计算 |
-| 6 | sgemm_tiled | 使用 shared memory 分块的矩阵乘 | 分块 (tiling) 算法, 数据复用, shared memory 容量约束 |
-| 7 | sgemm_vectorized | 使用向量化访存的分块矩阵乘 | float4 向量化加载, 寄存器分块 |
+| 1 | vector_add_raw | 不依赖 PyTorch 的纯 CUDA vector_add | cudaMalloc / cudaMemcpy / cudaFree 全流程 |
+| 2 | async_vector_op | CPU 输入输出, GPU 上做复合运算, 分块 + 多 stream 流水线 | pinned memory, cudaMemcpyAsync, stream 重叠 |
+| 3 | matrix_transpose_naive | 朴素矩阵转置，直接读写 global memory | 非合并访存的性能影响, 行优先 vs 列优先 |
+| 4 | matrix_transpose_smem | 使用 shared memory 中转的矩阵转置 | shared memory 声明和使用, bank conflict 及 padding |
+| 5 | dot_product | 两个向量的点积运算 | shared memory 实现 block 内 reduce, __syncthreads 同步 |
+| 6 | gemv | 矩阵与向量相乘 | 行访问 vs 列访问模式的性能差异 |
+| 7 | sgemm_naive | 最朴素的 FP32 矩阵乘 | GEMM 基本实现逻辑, GFLOPS 计算 |
+| 8 | sgemm_tiled | 使用 shared memory 分块的矩阵乘 | 分块 (tiling) 算法, 数据复用, shared memory 容量约束 |
+| 9 | sgemm_vectorized | 使用向量化访存的分块矩阵乘 | float4 向量化加载, 寄存器分块 |
 
 ### 验收标准
 
+- 能用 cudaMalloc/cudaMemcpy/cudaFree 手动管理显存，完成完整的 H2D → kernel → D2H 流程。
+- 能解释 stream 的作用，能用 cudaMemcpyAsync + 多 stream 实现 H2D / kernel / D2H 流水线重叠。
 - 能清晰解释 global/shared/register 的区别和使用场景。
 - matrix_transpose_smem 相比 naive 版本有明显加速，能解释原因。
 - sgemm_tiled 相比 naive 版本有 5x 以上加速，能用 ncu 分析瓶颈在 compute 还是 memory。
