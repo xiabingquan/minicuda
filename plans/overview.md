@@ -62,7 +62,7 @@
 | 序号 | Kernel | 概述 | 知识点 |
 |------|--------|------|--------|
 | 1 | vector_add_raw | 不依赖 PyTorch 的纯 CUDA vector_add | cudaMalloc / cudaMemcpy / cudaFree 全流程 |
-| 2 | async_vector_op | CPU 输入输出, GPU 上做复合运算, 分块 + 多 stream 流水线 | pinned memory, cudaMemcpyAsync, stream 重叠 |
+| 2 | cpu_large_vector_add_async | CPU 输入输出, GPU 上做大向量加法, 分块 + 多 stream 流水线 | pinned memory, cudaMemcpyAsync, stream 重叠 |
 | 3 | matrix_transpose_naive | 朴素矩阵转置，直接读写 global memory | 非合并访存的性能影响, 行优先 vs 列优先 |
 | 4 | matrix_transpose_smem | 使用 shared memory 中转的矩阵转置 | shared memory 声明和使用, bank conflict 及 padding |
 | 5 | dot_product | 两个向量的点积运算 | shared memory 实现 block 内 reduce, __syncthreads 同步 |
@@ -252,7 +252,76 @@
 
 ---
 
-## 课程 8: Flash Attention
+## 课程 8: 张量并行与通信-计算重叠
+
+### 学习目标
+
+理解 Tensor Parallelism（TP）的两种基本切分模式（column-parallel / row-parallel），掌握 NCCL 集合通信原语的 CUDA 端使用方法，重点学习如何把 AllGather/ReduceScatter 与 GEMM 重叠以隐藏通信延迟。这是大模型分布式训练和推理的核心优化手段。
+
+### 知识点
+
+- 集合通信原语：all-reduce、all-gather、reduce-scatter、broadcast 的语义与带宽分析。
+- NCCL 基础：通信子（communicator）、stream 关联、ncclSend/ncclRecv P2P 通信。
+- TP 切分模式：column-parallel（按列切 weight，需要 AllReduce 输出）vs row-parallel（按行切 weight，需要 AllGather 输入或 ReduceScatter 输出）。
+- Sequence Parallelism：在 LayerNorm/Dropout 阶段沿 sequence 维度切分，配合 TP 形成完整切分方案。
+- 通信-计算重叠的实现路径：将大 GEMM 分块后与逐块通信交错、独立 stream 异步发起 NCCL、event 同步控制依赖。
+- SM 资源切分：通信 kernel 与计算 kernel 同时运行时如何分配 SM。
+- nsys timeline 分析：判断重叠是否真正发生、识别通信被计算 cover 的程度。
+
+### 实践项目
+
+| 序号 | Kernel | 概述 | 知识点 |
+|------|--------|------|--------|
+| 1 | nccl_basics | 单机多卡 AllReduce / AllGather / ReduceScatter 跑通 | NCCL communicator 初始化, stream 绑定, 基本性能测量 |
+| 2 | tp_column_parallel_baseline | column-parallel TP（无重叠）：先 GEMM 再 AllReduce | TP 数学切分, 完整通信开销建立 baseline |
+| 3 | tp_allgather_gemm_overlap | row-parallel TP 中 AllGather 输入与 GEMM 重叠 | 分块 AllGather + 分块 GEMM 流水线, 独立 stream 异步 NCCL |
+| 4 | tp_gemm_reducescatter_overlap | column-parallel TP 中 GEMM 与 ReduceScatter 重叠 | 输出分块, GEMM 完一块就发起 ReduceScatter, 计算/通信解耦 |
+| 5 | tp_overlap_profile | 用 nsys 对比有/无重叠版本的 timeline | 识别"通信被覆盖"的时间段, 量化重叠收益 |
+
+### 验收标准
+
+- 能解释 column-parallel 和 row-parallel TP 的 weight 切分方式及对应通信原语。
+- 能用 NCCL + CUDA stream 实现 AllGather/ReduceScatter 与 GEMM 的重叠。
+- 重叠版本相比串行版本吞吐有明显提升，能在 nsys timeline 上看到通信与 GEMM 在同一时段并行。
+- 能解释为什么 SM 资源争用会限制重叠效果，了解 NVIDIA 在新架构上提供的硬件辅助手段（如 Hopper 的 Async Transaction Barrier）。
+
+---
+
+## 课程 9: Ring Attention 与序列并行
+
+### 学习目标
+
+理解长序列训练/推理中 sequence parallelism 的必要性，掌握 Ring Attention 的核心思想：将 KV 沿 sequence 维度切分到多个 GPU，通过环形 P2P 通信让每个 Q 看到所有 KV 块，配合 online softmax 在跨 GPU 场景下完成完整 attention。
+
+### 知识点
+
+- 长序列场景下的内存瓶颈：Q/K/V 与 attention 矩阵随 sequence 长度二次方增长。
+- Sequence Parallelism：沿 sequence 维度切分 Q/K/V 到多个 GPU，每个 GPU 持有部分 sequence 段。
+- Online softmax 跨 GPU 扩展：每个 GPU 对本地 KV 块做局部 softmax 累积，结合远端 KV 块时合并 max/sum 统计量。
+- 环形通信模式：N 个 GPU 形成 ring，每轮把 KV 块传给下一个邻居，N-1 轮后每个 GPU 都看过所有 KV。
+- 通信-计算重叠：当前 KV 块计算的同时，下一个 KV 块通过 NCCL P2P send/recv 异步从邻居接收。
+- 双缓冲：两块 KV 接收 buffer 轮流使用，避免覆盖正在被计算的数据。
+- Causal masking 在 ring 模式下的处理：跳过完全在 mask 外的 KV 块。
+
+### 实践项目
+
+| 序号 | Kernel | 概述 | 知识点 |
+|------|--------|------|--------|
+| 1 | online_softmax_merge | 实现两个 partial softmax 统计量（local max + sum + output）的合并算子 | online softmax 数学推导, 跨段 softmax 等价性 |
+| 2 | ring_attention_baseline | 把 KV 完整 AllGather 到所有 GPU 后单卡 attention | sequence 切分 + 通信 baseline, 验证正确性 |
+| 3 | ring_attention_overlap | 真正的 Ring Attention：双缓冲 + P2P send/recv 与计算重叠 | 环形 P2P, 双缓冲 KV, 计算与通信重叠, 跨 GPU online softmax |
+| 4 | ring_attention_causal | 加 causal mask 的 Ring Attention | mask 在环形迭代中的位置变化, 完全 mask 块的跳过 |
+
+### 验收标准
+
+- 能从数学上推导 online softmax 在两段 partial 结果合并时的公式，并实现 online_softmax_merge 算子。
+- ring_attention_overlap 在多 GPU 上的输出与单卡 flash attention 数值一致。
+- 能用 nsys 看到 NCCL P2P send/recv 与 attention kernel 在 timeline 上的重叠。
+- 能解释 Ring Attention 相比"完整 AllGather KV"方案在显存和通信总量上的优势。
+
+---
+
+## 课程 10: Flash Attention
 
 ### 学习目标
 
@@ -284,7 +353,7 @@
 
 ---
 
-## 课程 9: DeepEP
+## 课程 11: DeepEP
 
 ### 学习目标
 
@@ -316,7 +385,7 @@
 
 ---
 
-## 课程 10: DeepGEMM
+## 课程 12: DeepGEMM
 
 ### 学习目标
 

@@ -20,20 +20,19 @@
 
 产出：csrc/vector_add_raw.cu，不依赖 PyTorch，纯 `nvcc` 编译运行。
 
-### Step 2: 异步执行与 stream
+### Step 2: 异步执行 — CPU 与 GPU 重叠
 
-理解同步 API 的瓶颈，学习 stream + async 实现 H2D / kernel / D2H 的流水线重叠。适用场景：输入输出在 CPU、计算在 GPU，数据量较大的批处理任务。
+学习用 `cudaMemcpyAsync` 实现"CPU 数据搬运"和"GPU 计算+传输"的重叠。
 
 具体内容：
-- `cudaMallocHost` / `cudaFreeHost`: 分配 pinned memory（不可换页），是 async 拷贝生效的前提。
-- `cudaMemcpyAsync`: 异步拷贝，立即返回不阻塞 CPU。
-- `cudaStream_t` + `cudaStreamCreate` / `cudaStreamDestroy`: stream 是 GPU 上的操作队列，同 stream 内串行、跨 stream 可并行。
-- `cudaStreamSynchronize`: 等待某个 stream 上所有操作完成。
-- kernel launch 的第 4 个参数指定 stream：`kernel<<<grid, block, smem, stream>>>(...)`。
-- 三阶段流水线模式：将大数组分成 N 个 chunk，每个 chunk 在自己的 stream 上完成 H2D → kernel → D2H，相邻 chunk 重叠不同阶段。
-- 用 nsys timeline 直观观察 stream 的并行执行。
+- `cudaMallocHost` / `cudaFreeHost`: 分配 pinned memory（不可换页 host 内存），是 async 拷贝生效的前提。
+- 为什么需要 pin：DMA 需要稳定的物理地址，普通 `malloc` 内存可能被 OS 换页，async 拷贝会退化为同步。
+- `cudaMemcpyAsync`: 异步拷贝，立即返回不阻塞 CPU。配合 pinned host buffer 才真正异步。
+- `cudaStream_t` + `cudaStreamSynchronize`: 单 stream 也需要 stream handle 来管理异步操作的同步点。
+- Ping-pong buffer（双缓冲）：核心设计模式。两组 pinned buffer 轮流用，使得 CPU 在准备 chunk N+1 时，GPU 还能用 buffer 处理 chunk N。
+- 用 nsys 验证 CPU memcpy 和 GPU 异步拷贝/计算的时间重叠。
 
-产出：csrc/async_vector_op.cu — 输入输出为 CPU 数组，GPU 上做复合运算（如 `sin(x)*exp(x)+sqrt(|x|)`），分块 + 多 stream 实现流水线，对比同步版本的性能差异。
+产出：csrc/cpu_large_vector_add_async.cu — 输入输出均为 CPU tensor 的大向量加法。wrapper 内部分块、用 pinned 双缓冲，将数据拷到 GPU 上算后再拷回。对比同步版本观察性能提升。
 
 ### Step 3: GPU 内存层级
 
