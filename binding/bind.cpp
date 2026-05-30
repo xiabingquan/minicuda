@@ -2,6 +2,7 @@
 
 torch::Tensor vector_add(torch::Tensor a, torch::Tensor b);
 torch::Tensor vector_add_raw(torch::Tensor a, torch::Tensor b);
+torch::Tensor cpu_large_vector_add_async(torch::Tensor a, torch::Tensor b, int buffer_size);
 torch::Tensor saxpy(torch::Tensor x, torch::Tensor y, float a);
 torch::Tensor matrix_add(torch::Tensor a, torch::Tensor b);
 torch::Tensor rgb_to_grayscale(torch::Tensor inp);
@@ -12,6 +13,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
             py::arg("a"), py::arg("b"));
       m.def("vector_add_raw", &vector_add_raw, "Element-wise vector addition (raw CUDA, no PyTorch alloc)",
             py::arg("a"), py::arg("b"));
+      m.def("cpu_large_vector_add_async", &cpu_large_vector_add_async,
+            "CPU-input/output vector addition with chunked GPU pipeline + ping-pong pinned buffers",
+            py::arg("a"), py::arg("b"), py::arg("buffer_size") = 1024);
       m.def("saxpy", &saxpy, "Compute z = a * x + y (CUDA)",
             py::arg("x"), py::arg("y"), py::arg("a"));
       m.def("matrix_add", &matrix_add, "Element-wise matrix addition (CUDA)",
