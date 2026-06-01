@@ -5,6 +5,9 @@ from minicuda._C import (
     saxpy,
     matrix_add,
     rgb_to_grayscale,
+    transpose_naive,
+    transpose_shared,
+    dot_product,
 )
 
 __all__ = [
@@ -14,4 +17,7 @@ __all__ = [
     "saxpy",
     "matrix_add",
     "rgb_to_grayscale",
+    "transpose_naive",
+    "transpose_shared",
+    "dot_product",
 ]

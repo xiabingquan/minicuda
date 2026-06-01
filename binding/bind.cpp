@@ -6,6 +6,9 @@ torch::Tensor cpu_large_vector_add_async(torch::Tensor a, torch::Tensor b, int b
 torch::Tensor saxpy(torch::Tensor x, torch::Tensor y, float a);
 torch::Tensor matrix_add(torch::Tensor a, torch::Tensor b);
 torch::Tensor rgb_to_grayscale(torch::Tensor inp);
+torch::Tensor transpose_naive(torch::Tensor inp);
+torch::Tensor transpose_shared(torch::Tensor inp);
+torch::Tensor dot_product(torch::Tensor a, torch::Tensor b);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
@@ -22,4 +25,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
             py::arg("a"), py::arg("b"));
       m.def("rgb_to_grayscale", &rgb_to_grayscale, "RGB to grayscale conversion (CUDA)",
             py::arg("inp"));
+      m.def("transpose_naive", &transpose_naive, "Naive matrix transpose (CUDA)",
+            py::arg("inp"));
+      m.def("transpose_shared", &transpose_shared, "Shared memory matrix transpose (CUDA)",
+            py::arg("inp"));
+      m.def("dot_product", &dot_product, "Vector dot product with shared memory reduction (CUDA)",
+            py::arg("a"), py::arg("b"));
 }
