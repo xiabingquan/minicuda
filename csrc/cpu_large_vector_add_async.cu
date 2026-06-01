@@ -4,7 +4,7 @@
 #include <vector>
 #include <utility>
 
-__global__ void vector_add_kernel(float *a, float *b, float *c, int n)
+__global__ void cpu_large_vector_add_async_kernel(float *a, float *b, float *c, int n)
 {
   int i = blockDim.x * blockIdx.x + threadIdx.x;
   if (i < n)
@@ -49,7 +49,7 @@ torch::Tensor cpu_large_vector_add_async(torch::Tensor a, torch::Tensor b, int b
       cudaMemcpyAsync(a_d_ptr, buffers[cur_buffer_idx], cur_real_size * sizeof(float), cudaMemcpyHostToDevice, current);
       cudaMemcpyAsync(b_d_ptr, buffers[cur_buffer_idx] + buffer_size, cur_real_size * sizeof(float), cudaMemcpyHostToDevice, current);
       grid_size = (cur_real_size + block_size - 1) / block_size;
-      vector_add_kernel<<<grid_size, block_size>>>(a_d_ptr, b_d_ptr, c_d_ptr + cur_offset, cur_real_size);
+      cpu_large_vector_add_async_kernel<<<grid_size, block_size>>>(a_d_ptr, b_d_ptr, c_d_ptr + cur_offset, cur_real_size);
       cur_offset += cur_real_size;
       nvtxRangePop();
     }
