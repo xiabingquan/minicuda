@@ -9,6 +9,7 @@ torch::Tensor rgb_to_grayscale(torch::Tensor inp);
 torch::Tensor transpose_naive(torch::Tensor inp);
 torch::Tensor transpose_shared(torch::Tensor inp);
 torch::Tensor dot_product(torch::Tensor a, torch::Tensor b);
+torch::Tensor gemv(torch::Tensor A, torch::Tensor x);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
@@ -31,4 +32,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
             py::arg("inp"));
       m.def("dot_product", &dot_product, "Vector dot product with shared memory reduction (CUDA)",
             py::arg("a"), py::arg("b"));
+      m.def("gemv", &gemv, "Matrix-vector multiply y = A @ x (CUDA)",
+            py::arg("A"), py::arg("x"));
 }

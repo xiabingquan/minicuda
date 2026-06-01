@@ -45,7 +45,7 @@
 ## 通用学习流程
 
 1. 用户针对项目计划进行提问，提问完毕后撰写笔记。
-2. 用户写 .cu 代码，agent 辅助补全（如提供 main 函数，用 libtorch 对比结果做精度测试）。
+2. 用户写 .cu 代码，agent 辅助补全（如提供 main 函数，用 libtorch 对比结果做精度测试）。添加 main 函数时同步修改 run.sh 中的 SRC 指向该文件。
 3. 用户用 nvcc 单独编译该 kernel（run.sh），确保单测通过。
 4. Agent 辅助完成集成：删除main函数、添加 pybind 绑定、.pyi 类型文件、Python 单测等。
 5. 用户跑 Python 单测，确保测试通过。

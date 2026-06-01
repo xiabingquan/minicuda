@@ -70,7 +70,6 @@
 
 具体内容：
 - 实现 y = A * x，每个 thread/warp 负责一行的点积。
-- 对比按行访问 vs 按列访问 A 的性能差异（coalescing 影响）。
 - 学习 warp 内协作：一个 warp 处理一行，用 warp shuffle 做归约。
 
 产出：csrc/gemv.cu。

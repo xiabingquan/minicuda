@@ -444,3 +444,56 @@ else
 ```
 
 归约逻辑本身不需要额外判断 — 因为越界位置已填 0，加起来不影响结果。
+
+# Step 6: GEMV — 矩阵向量乘
+
+计算 `y = A @ x`，A 为 m×d 矩阵，x 为长度 d 的向量，输出 y 为长度 m。
+
+## 任务划分
+
+使用 2D block `dim3(WARP_SIZE, WARP_SIZE)` = 32×32 = 1024 个 thread：
+
+- threadIdx.y：区分不同行。同一 threadIdx.y 的 32 个 thread（一个 warp）协作处理矩阵的同一行。
+- threadIdx.x：同一 warp 内的 32 个 thread 用 stride loop 遍历该行的 d 个元素。
+- blockIdx.x：1D grid，每个 block 处理 32 行（blockDim.y = 32）。
+
+```
+row_idx = blockIdx.x * blockDim.y + threadIdx.y
+```
+
+## 计算流程
+
+1. 每个 thread 用 stride loop 累加部分乘积到 `buf[threadIdx.y][threadIdx.x]`：
+
+```
+for (int i = threadIdx.x; i < d; i += blockDim.x)
+    buf[threadIdx.y][threadIdx.x] += A[d * row_idx + i] * x[i];
+```
+
+2. `__syncthreads()` 确保所有 thread 写完。
+
+3. 树形归约沿 threadIdx.x 方向将 32 个部分和合并为一个值 `buf[threadIdx.y][0]`：
+
+```
+for (int stride = WARP_SIZE / 2; stride > 0; stride >>= 1)
+{
+    if (threadIdx.x < stride)
+        buf[threadIdx.y][threadIdx.x] += buf[threadIdx.y][threadIdx.x + stride];
+    __syncthreads();
+}
+```
+
+4. threadIdx.x == 0 的 thread 写结果：`y[row_idx] = buf[threadIdx.y][0]`。
+
+## 同步时机
+
+| 阶段 | 同步 |
+|---|---|
+| buf 初始化后 | 不需要（每个 thread 只读写自己的 slot） |
+| stride loop 累加完 | `__syncthreads()`（归约前保证所有部分和就位） |
+| 归约每一轮 | `__syncthreads()`（本轮写入对下一轮可见） |
+
+## 边界条件
+
+- `row_idx >= m` 的 thread：stride loop 不执行（外层 if 守卫），buf 保持初始值 0，不影响归约。
+- 写 y 时需要 `row_idx < m` 检查，避免最后一个 block 越界写。

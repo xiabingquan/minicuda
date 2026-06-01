@@ -8,6 +8,7 @@ from minicuda._C import (
     transpose_naive,
     transpose_shared,
     dot_product,
+    gemv,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "transpose_naive",
     "transpose_shared",
     "dot_product",
+    "gemv",
 ]
