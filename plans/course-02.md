@@ -34,7 +34,7 @@
 
 产出：csrc/cpu_large_vector_add_async.cu — 输入输出均为 CPU tensor 的大向量加法。wrapper 内部分块、用 pinned 双缓冲，将数据拷到 GPU 上算后再拷回。对比同步版本观察性能提升。
 
-### Step 3: GPU 内存层级
+### Step 3: GPU 内存层级与 warp 调度
 
 具体内容：
 - Global memory: 大容量（数十 GB）、高延迟（~400 cycles），所有 thread 可见。
@@ -42,9 +42,10 @@
 - Register: 最快、每 thread 私有，数量有限。
 - L1/L2 cache: 硬件自动管理，了解但不直接控制。
 - Memory coalescing: 同一 warp 内 32 个 thread 访问连续地址时合并为一次事务。
-- `__syncthreads()`: block 内同步屏障的语义和使用时机。
+- 同步原语：`__syncthreads()` (block 级) / `__syncwarp(mask)` (warp 级) / cooperative groups / grid-level sync。
+- Warp 调度与 latency hiding：SM 上同时驻留多个 warp，scheduler 在 cycle 之间切换 ready warp 来盖住访存延迟；occupancy 指 active warps 占 SM 上限的比例，寄存器/shared memory 用量决定 occupancy 上限。
 
-产出：笔记总结各层级的容量、延迟、可见性对比。
+产出：笔记总结各层级的容量、延迟、可见性对比，及 warp 调度的工作机制。
 
 ### Step 4: 矩阵转置 — 体会访存模式的影响
 
@@ -56,7 +57,7 @@
 
 产出：csrc/transpose_naive.cu + csrc/transpose_shared.cu。
 
-### Step 5: dot_product — shared memory reduce
+### Step 5: 向量点积 — shared memory 归约
 
 具体内容：
 - 每个 block 用 shared memory 做 block 内 reduction（归约求和）。

@@ -137,3 +137,310 @@ nsys profile -t nvtx,cuda,osrt --stats=true -o /tmp/profile ./prog
 GUI 里展开主线程 → NVTX 行，可以看到 cpu_memcpy 与 CUDA HW 行上的 H2D / kernel 在同一时间段并行：
 
 ![CPU/GPU overlap timeline](../assets/course-02/cpu-gpu-overlap.png)
+
+# 3. GPU 内存层级
+
+## 各层级概览
+
+GPU 上 thread 能访问的存储从快到慢、从小到大依次是：register、shared memory（与 L1 cache 共用 SRAM）、L2 cache、global memory (HBM)。下图给出 H100 (Hopper) 的典型参数：
+
+![GPU memory hierarchy](../assets/course-02/memory-hierarchy.png)
+
+| 层级 | 容量 (H100) | 延迟 | 可见性 |
+|---|---|---|---|
+| Register | 256 KB / SM | ~1 cycle | per thread |
+| Shared memory | 最多 228 KB / SM | ~20-40 cycle | per block |
+| L1 cache | 与 shared memory 共享 SRAM | ~30 cycle | per SM, 硬件管理 |
+| L2 cache | 50 MB | ~200 cycle | 全 GPU, 硬件管理 |
+| Global memory (HBM) | 80 GB | ~400-800 cycle | 全 GPU |
+
+## Register
+
+最快、每个 thread 私有。kernel 中声明的局部变量优先放 register。register 数量有限，超出后编译器会把变量"溢出"到 local memory（实际是 global memory 的一段，访问延迟高）。
+
+编译时加 `-Xptxas -v` 可以看到每个 kernel 的 register 用量。
+
+## Shared memory
+
+每个 block 内的 thread 共享，典型用途：
+- block 内归约：每个 thread 写一个值到 shared memory，再树形 reduce
+- tile-based 数据复用：tiled GEMM 把 A / B 的 tile 加载到 shared memory，block 内 thread 共同使用
+- 跨 thread 通信：配合 `__syncthreads()` 保证写入完成后再读
+
+声明方式：
+
+```cuda
+__shared__ float tile[TILE_M][TILE_N];  // 静态分配, 大小编译期确定
+extern __shared__ float buf[];           // 动态分配, kernel 启动时 <<<grid, block, smem_bytes>>>
+```
+
+## L1 / L2 cache
+
+硬件自动管理，代码不直接控制，但访存模式会影响命中率。L1 与 shared memory 共享同一块 SRAM，部分场景可以通过 `cudaFuncSetAttribute` 调整二者比例。L2 是全 GPU 共享，受访存局部性影响明显。
+
+## Global memory (HBM)
+
+容量最大但延迟最高，是大部分 kernel 的瓶颈。常见优化：
+
+- Coalesced access：同一 warp 的 32 个 thread 访问连续地址时硬件合并为 1-2 次事务
+- 减少访问次数：用 shared memory / register 缓存中间结果，避免重复读
+- Vectorized load：用 `float4` / `int4` 一次读 16 字节，提高带宽利用率
+
+## 同步原语
+| 同步原语 | 作用范围 | 典型场景 |
+|---|---|---|
+| `__syncthreads()` | block 内所有 thread | shared memory 写后读 |
+| `__syncwarp(mask)` | warp 内（默认全 32 thread） | warp shuffle 后、warp 内分支汇合 |
+| Cooperative groups `.sync()` | 灵活组（tile / warp / block / grid） | 现代 CUDA 推荐写法 |
+| Grid-level sync | 整个 grid（需要 cooperative launch） | persistent kernel、跨 block 同步 |
+
+## 数据放在哪里
+
+写 kernel 时按以下顺序考虑：
+
+1. 单 thread 内反复使用的标量、小数组 → register
+2. 同 block 内多 thread 共用、有局部性的数据 → shared memory（注意 bank conflict）
+3. 跨 block 共享、读多写少 → 依赖 L2 cache（保持访问模式有局部性）
+4. 大块原始数据读写 → global memory，要求 coalesced
+
+## Warp 调度与 latency hiding
+
+SM 上同时**驻留**多个 warp，但每 cycle 只有少数 warp 在执行。以 H100 单 SM 为例：
+
+- 4 个 warp scheduler，每 cycle 各能从一个 ready warp 发射 1 条指令 → 同时推进 4 × 32 = 128 个 thread
+- 上限可驻留 64 warp（2048 thread），它们的寄存器和 shared memory 状态全部留在 SM 上不换出
+
+执行时调度器从驻留 warp 中挑 ready 的发射指令。warp 大部分时间处于 stall 状态：
+
+| stall 原因 | 持续时间 |
+|---|---|
+| Global memory load | 400-800 cycle |
+| Shared memory bank conflict | 几到几十 cycle |
+| 指令流水线依赖 | 4-20 cycle |
+| `__syncthreads()` 等同步 | 看其他 warp 进度 |
+
+只要 SM 上有足够多的 ready warp 可切换，访存延迟就被"用别的 warp 的计算盖住"，这就是 latency hiding。
+
+## Occupancy
+
+Occupancy = SM 上活跃 warp 数 / SM 上限。寄存器和 shared memory 用量决定 occupancy 上限：每 thread 用越多寄存器 → SM 能塞下的 warp 越少。
+
+经验值：
+
+- Memory-bound kernel：occupancy ≥ 50%（32 warp / 64），warp 多到能盖住 400+ cycle 访存延迟。
+- Compute-bound kernel（Tensor Core 重计算）：occupancy 25%-50% 也够，少量 warp 就能喂饱流水线。
+- 仅满足"warp 数 ≥ scheduler 数（4）"远远不够 — 因为 warp 大部分时间不可发射。
+
+工具：
+
+- `nvcc -Xptxas -v`：打印每个 kernel 的寄存器和 shared memory 用量
+- `ncu`：报告 active warps、theoretical occupancy 等指标
+- `__launch_bounds__(maxThreadsPerBlock, minBlocksPerSM)`：编译期提示，必要时让编译器 spill 寄存器以保 occupancy
+
+## 进一步：occupancy 不是目的
+
+Occupancy 只是手段，真正的目标是 **每 cycle scheduler 能找到足够的 ready warp 发射指令**。
+
+```
+吞吐 = 并发量 / 延迟  (Little's Law)
+
+让 scheduler 满载有两条路:
+  A. 增大 warp 数量          → 提高 occupancy
+  B. 减少每个 warp 的 stall  → 提高指令级并行 (ILP)
+```
+
+两条路等价。极端例子：flash-attn / CUTLASS 用每 thread 200+ 寄存器、occupancy 只有 12.5%，但通过深度流水线、`cp.async` / TMA 异步搬运、足够 prefetch 减少了 stall，依然能跑满 SM。
+
+实际调优用 `ncu` 看 "Warp Stall Reason" 直接定位每个 warp 在等什么，对症下药。
+
+# 4: 矩阵转置
+
+## Naive 实现
+
+每个 thread 负责一个元素：从输入矩阵 `(row, col)` 读，写到输出矩阵 `(col, row)`。
+
+矩阵按 row-major 存储，所以"按行读"是地址连续的（coalesced），"按列写"则地址跳跃大（strided）。Global memory 以 128 字节 cache line 为最小搬运粒度，warp 内 32 个 thread 各写不同 cache line 时，硬件搬 32 条 cache line 但每条只用 4 字节，带宽利用率 1/32。
+
+反过来（按列读、按行写）也一样 — 读和写总有一个方向是 strided，无法同时 coalesced。
+
+## Shared Memory 实现思路
+
+核心 idea：用一块 tile 大小（如 32×32）的 shared memory 做中转，让 global memory 的读和写都变成 coalesced，把 strided 访问限制在 shared memory 上。
+
+步骤：
+
+1. Block 内所有 thread 协作从 global memory 按行连续读一个 tile 到 shared memory — 读 coalesced。
+2. `__syncthreads()` 确保 tile 写入完成。
+3. 从 shared memory 按列读（即转置后的顺序），按行连续写到输出矩阵 — 写 coalesced。
+
+问题：步骤 3 中按列读 shared memory 会引发 bank conflict（下文解释），性能受损。
+
+## Shared Memory 与 Bank Conflict
+
+### Shared Memory 为什么不怕 stride
+
+Shared memory 是片上 SRAM，硬件模型和 global memory 完全不同。它没有 cache line 的概念，不存在"搬了一大块只用一小块"的带宽浪费。它由 32 个独立的 bank 组成，只要 32 个 thread 访问不同 bank，无论地址是否连续，都是一个 cycle 同时完成。
+
+### Bank 映射规则
+
+按 4 字节（一个 word）粒度轮流分配到 32 个 bank：
+
+```
+word 0 → bank 0
+word 1 → bank 1
+...
+word 31 → bank 31
+word 32 → bank 0   (循环)
+word 33 → bank 1
+...
+```
+
+通用公式：word index 为 `i` 的数据落在 bank `i % 32`。
+
+这种 interleaved 设计使最常见的访问模式（相邻 thread 访问相邻地址）天然无冲突。
+
+### 什么是 Bank Conflict
+
+一个 warp 的 32 个 thread 同时访问 shared memory 时：
+
+- 不同 thread 访问不同 bank → 一个 cycle 完成，无冲突
+- 多个 thread 访问同一 bank 的不同 word → 必须串行化，称为 N-way bank conflict
+- 多个 thread 访问同一 bank 的同一 word → broadcast，无冲突（仅对读有效）
+
+类比：32 个 bank 像 32 个图书管理员，每人管很多本书。两人找同一个管理员要同一本书 → 拿一次给两人看（broadcast）；找同一个管理员要不同的书 → 必须跑两趟（conflict）。
+
+### 转置中为什么产生 Bank Conflict
+
+tile 为 32×32 float，每行 32 个 word。按列读 column 0：
+
+- thread k 读 `(k, 0)` → word index = `k * 32` → bank = `(k * 32) % 32 = 0`
+
+32 个 thread 全落在 bank 0 的不同 word 上（不满足 broadcast 条件），产生 32-way conflict，完全串行。
+
+## 解决方案：Padding
+
+将 shared memory 声明为 32×33（每行多一个 padding word），每行变为 33 个 word。按列读 column 0：
+
+- thread k 读 `(k, 0)` → word index = `k * 33` → bank = `(k * 33) % 32`
+
+因为 33 和 32 互质（gcd = 1），`k * 33 mod 32` 在 k = 0…31 上产生 32 个不同值，32 个 thread 各落一个 bank，零冲突。
+
+对于 bf16、fp8 等小于 4 字节的类型，bank 映射粒度不变（固定 4 字节），连续访问时多个 thread 落在同一 word 触发 broadcast（读时无冲突）。但按列读时仍存在 bank conflict，严重程度取决于行 stride 与 32 的公因数大小，padding 思路同样适用。
+
+## 实现细节：坐标映射与数据流
+
+### threadIdx 与矩阵坐标的关系
+
+CUDA 中 `threadIdx.x` 是线性 ID 的最内层维度，同一 warp 内 `threadIdx.y` 固定、`threadIdx.x` = 0..31。为了让 warp 内的 global memory 访问 coalesced，必须让 `threadIdx.x` 对应矩阵的列方向（地址快变化维度）：
+
+```
+tx = threadIdx.x  →  列 (col)
+ty = threadIdx.y  →  行 (row)
+```
+
+Grid 维度分配（让 `blockIdx.y` 对应行，符合"y = 垂直 = 行"的直觉）：
+
+```
+grid_size.x = ceil(n / 32)   →  blockIdx.x 枚举列方向的 tile
+grid_size.y = ceil(m / 32)   →  blockIdx.y 枚举行方向的 tile
+```
+
+### 数据流
+
+![Shared memory transpose data flow](../assets/course-02/transpose-shared-dataflow.png)
+
+一个 warp（ty 固定，tx = 0..31）在整个流程中的行为：
+
+1. 从 input 读一行连续的 32 个 float（coalesced），写入 tile 的同一行：
+
+```
+in_row = blockIdx.y * blockDim.y + ty
+in_col = blockIdx.x * blockDim.x + tx
+tile[ty][tx] = inp[in_row * n + in_col]
+```
+
+2. `__syncthreads()` — 等待 block 内所有 thread 写完 tile。
+
+3. 从 tile 的同一列读 32 个元素（bank conflict 通过 padding 消除），写入 output 的一行连续地址（coalesced）：
+
+```
+out_row = blockIdx.x * blockDim.y + ty
+out_col = blockIdx.y * blockDim.x + tx
+out[out_row * m + out_col] = tile[tx][ty]
+```
+
+### 为什么输出坐标和输入坐标不同
+
+输入 tile 位于 input 矩阵的 `(blockIdx.y, blockIdx.x)` 位置，转置后对应 output 矩阵的 `(blockIdx.x, blockIdx.y)` 位置。所以 output 的行基址从 `blockIdx.x` 算起，列基址从 `blockIdx.y` 算起——与输入恰好交换。
+
+同时，tile 的读取索引也做了转置：写入时是 `tile[ty][tx]`，读出时是 `tile[tx][ty]`。同一个位置由不同 thread 写入和读出，这正是 shared memory 和 `__syncthreads()` 存在的意义。
+
+# Step 5: 向量点积 — shared memory 归约
+
+## 三级数据层级
+
+Dot product 的计算 `sum(a[i] * b[i])` 涉及三个层级的数据：
+
+1. Register（per thread）：每个 thread 计算自己负责的 `a[i] * b[i]`，结果暂存在寄存器中。
+2. Shared memory（per block）：block 内所有 thread 把各自的乘积写入 shared memory，然后协作做树形归约，得到该 block 的部分和。
+3. Global memory（全局）：各 block 的部分和通过 `atomicAdd` 累加到全局结果。
+
+## 同步时机
+
+| 阶段 | 操作 | 同步 |
+|---|---|---|
+| 各 thread 计算 `a[i]*b[i]` 写入 `buf[li]` | register → shared | `__syncthreads()` 确保所有 thread 写完 |
+| 树形归约每一轮 | shared 内读写 | 每轮结束后 `__syncthreads()` 确保本轮写入对下一轮可见 |
+| thread 0 累加到全局 | shared → global | `atomicAdd` 保证多 block 并发写不丢失 |
+
+## 树形归约（以 16 个元素为例）
+
+假设 block 内有 16 个 thread，shared memory `buf[0..15]` 初始值为各 thread 的乘积：
+
+```
+初始:   [v0  v1  v2  v3  v4  v5  v6  v7  v8  v9  v10 v11 v12 v13 v14 v15]
+
+stride=8:  thread 0~7 活跃，各自 buf[i] += buf[i+8]
+        [v0+v8  v1+v9  v2+v10  v3+v11  v4+v12  v5+v13  v6+v14  v7+v15 | ...]
+        __syncthreads()
+
+stride=4:  thread 0~3 活跃
+        [v0..v12  v1..v13  v2..v14  v3..v15 | ...]
+        __syncthreads()
+
+stride=2:  thread 0~1 活跃
+        [v0..v14  v1..v15 | ...]
+        __syncthreads()
+
+stride=1:  thread 0 活跃
+        [v0..v15 | ...]
+        __syncthreads()
+```
+
+4 轮后 `buf[0]` = 全部 16 个值之和。一般地，N 个元素需要 log2(N) 轮。
+
+循环写法：
+
+```
+for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+{
+    if (threadIdx.x < stride)
+        buf[threadIdx.x] += buf[threadIdx.x + stride];
+    __syncthreads();
+}
+```
+
+注意 `stride >>= 1` 是除以 2，不是 `>>= 2`（除以 4）。
+
+## 边界条件
+
+当向量长度 n 不是 block_size 的整数倍时，最后一个 block 中部分 thread 的全局下标 `i >= n`。这些 thread 不应读 `a[i]`/`b[i]`（越界），需要在 shared memory 中填 0，确保归约时不引入垃圾值：
+
+```
+if (i < n)
+    buf[li] = a[i] * b[i];
+else
+    buf[li] = 0.0f;
+```
+
+归约逻辑本身不需要额外判断 — 因为越界位置已填 0，加起来不影响结果。
