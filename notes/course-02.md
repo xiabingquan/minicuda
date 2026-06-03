@@ -497,3 +497,89 @@ for (int stride = WARP_SIZE / 2; stride > 0; stride >>= 1)
 
 - `row_idx >= m` 的 thread：stride loop 不执行（外层 if 守卫），buf 保持初始值 0，不影响归约。
 - 写 y 时需要 `row_idx < m` 检查，避免最后一个 block 越界写。
+
+# 7. Naive GEMM
+
+计算 `C = A × B`，A 为 M×K，B 为 K×N，输出 C 为 M×N。
+
+每个 thread 负责 C 的一个元素，循环 K 次从 global memory 读 A 的一行和 B 的一列，做点积：
+
+```cuda
+if (row < M && col < N) {
+    float sum = 0.0f;
+    for (int i = 0; i < K; i++)
+        sum += A[row * K + i] * B[i * N + col];
+    C[row * N + col] = sum;
+}
+```
+
+性能差的原因：C 中每个元素都独立读 A 的一行和 B 的一列。同一行的 N 个输出元素共享 A 的同一行数据，但每个 thread 各自从 global memory 读一遍，产生 N 倍冗余读。B 同理有 M 倍冗余读。
+
+GFLOPS 计算：GEMM 总计算量为 `2 * M * N * K` FLOP（每个输出元素做 K 次乘法 + K 次加法），GFLOPS = `2 * M * N * K / time_seconds / 1e9`。
+
+# 8. Tiled GEMM — shared memory 数据复用
+
+## 核心思路
+
+将 A、B 沿 K 方向分成若干大小为 TILE_SIZE 的 tile。每次迭代中，block 内所有 thread 协作将 A 和 B 各一个 tile 加载到 shared memory，然后从 shared memory 读数据做计算。每个 A 元素被 TILE_SIZE 个 thread 复用（对应 B 的 TILE_SIZE 列），反之亦然。
+
+## `__syncthreads()` 的加入时机
+
+每次 tile 迭代需要两处同步：
+
+```
+for each tile along K:
+    协作加载 A tile 和 B tile 到 shared memory
+    __syncthreads()    // ① 加载完成屏障
+    计算：sum += sA[ty][j] * sB[j][tx]
+    __syncthreads()    // ② 计算完成屏障
+```
+
+① 保证所有 thread 的加载完成后再读取 — 否则 thread A 可能读到 thread B 还没写入的位置。
+
+② 保证所有 thread 读取完成后再覆写 — 否则下一轮加载会覆盖慢线程还在读的数据。
+
+两处 `__syncthreads()` 都不能放在 `if` 分支内。`__syncthreads()` 要求 block 内所有 thread 到达同一位置，如果部分线程因条件不满足而跳过，行为未定义（通常是挂死或崩溃）。
+
+## 边界条件：A 和 B 必须独立判断
+
+加载到 shared memory 时，A 和 B 的越界条件不能合并成一个 `if`：
+
+```cuda
+// 正确：独立判断
+sA[ty][tx] = (row < M && a_col < K) ? A[row * K + a_col] : 0.0f;
+sB[ty][tx] = (b_row < K && col < N) ? B[b_row * N + col] : 0.0f;
+
+// 错误：合并判断
+if (row < M && a_col < K && b_row < K && col < N) {
+    sA[ty][tx] = A[...];
+    sB[ty][tx] = B[...];
+} else {
+    sA[ty][tx] = 0; sB[ty][tx] = 0;
+}
+```
+
+原因在于 shared memory 是协作加载的，一个 thread 的输出越界不等于它加载的数据不被别人使用。
+
+以 B 为例，thread (tx, ty) 加载 `sB[ty][tx]`，但计算时 thread (tx, ty) 读的是 `sB[j][tx]`（按列读）。加载 sB 第 ty 行的 thread 和使用 sB 第 ty 行的 thread 是不同线程组 — 加载者的 col_idx 可能越界，但使用者的 col_idx 可能合法。如果用合并条件，加载者因自身越界把 sB 填 0，使用者拿到错误数据。
+
+A 没有这个问题：sA 第 ty 行由 ty 相同的所有线程加载，也由 ty 相同的线程使用。这些线程共享同一个 row_idx — 要么全合法，要么全越界，不会出现"加载者越界但使用者合法"的情况。尽管如此，A 和 B 的条件本身就不同（A 依赖 row 和 K 维，B 依赖 K 维和 col），分开写是自然的。
+
+写 C 的边界保护也不能省：
+
+```cuda
+if (row < M && col < N)
+    C[row * N + col] = sum;
+```
+
+## 性能对比
+
+1024×1024×1024 单精度矩阵乘法（warmup 10 次，重复 50 次取平均）：
+
+| Kernel | 耗时 | GFLOPS | 说明 |
+|---|---|---|---|
+| cuBLAS | 0.057 ms | 37803.6 | 参考上限 |
+| Naive | 0.421 ms | 5105.0 | 每个元素独立读 global memory |
+| Tiled (TILE=32) | 0.313 ms | 6855.8 | shared memory 数据复用 |
+
+Tiled 版本相比 naive 提升约 34%。与 cuBLAS 的差距仍然很大，后续可通过向量化访存（`float4`）、寄存器分块（register tiling）进一步缩小。
