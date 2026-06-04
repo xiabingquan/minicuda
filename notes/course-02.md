@@ -583,3 +583,38 @@ if (row < M && col < N)
 | Tiled (TILE=32) | 0.313 ms | 6855.8 | shared memory 数据复用 |
 
 Tiled 版本相比 naive 提升约 34%。与 cuBLAS 的差距仍然很大，后续可通过向量化访存（`float4`）、寄存器分块（register tiling）进一步缩小。
+
+# 9. Vectorized GEMM — 向量化访存 + 寄存器分块
+
+## Tiled GEMM 的两个瓶颈
+
+Tiled GEMM 相比 naive 已经通过 shared memory 减少了 global memory 的重复读取，但还存在两个效率问题：
+
+1. 搬运效率低：从 global memory 往 shared memory 搬数据时，每个 thread 一次只加载一个 float（4 字节）。GPU 的 load 指令最大支持 128 bit（16 字节），当前只用了 1/4 的搬运能力。
+
+2. 计算密度低：每个 thread 只负责 C 的一个输出元素。每次 K 迭代中，thread 从 shared memory 读 sA 的一个值和 sB 的一个值，做 1 次乘加 — 计算/访存比仅为 1:2。shared memory 的带宽被大量低效的标量读取占满。
+
+两个瓶颈分别对应两个优化：向量化访存解决搬运效率，寄存器分块解决计算密度。
+
+## 向量化访存（float4）
+
+`float4` 是 CUDA 内建的向量类型，包含 4 个 float（共 128 bit）。用 `float4` 做一次 load，硬件发一条指令搬 16 字节，相当于 4 次 float load 的数据量。
+
+效果：搬运同样大小的 tile，load 指令数减少到 1/4，指令发射压力和访存事务数都降低。
+
+## 寄存器分块（Register Tiling）
+
+核心思想：让每个 thread 负责 C 的一个 TM×TN 子块（如 8×8 = 64 个元素），而不是单个元素。
+
+每次 K 迭代中，thread 从 shared memory 读 TM 个 sA 值和 TN 个 sB 值到寄存器，然后在寄存器中做 TM×TN 次乘加。计算/访存比从 1:(TM+TN) 提升到 TM×TN:(TM+TN)。以 TM=TN=8 为例：64:16 = 4:1，比基础 tiled 版的 1:2 提升了 8 倍。
+
+block 内的线程数也随之变化：原来一个 128×128 的输出 tile 需要 128×128 = 16384 个 thread（远超上限），现在每个 thread 算 8×8 = 64 个元素，只需要 (128/8)×(128/8) = 256 个 thread。
+
+## 两者如何配合
+
+以 BM=BN=128, BK=8, TM=TN=8 为例：
+
+- Block 有 16×16 = 256 个 thread
+- 每次 tile 迭代加载 A tile（128×8 = 1024 float）和 B tile（8×128 = 1024 float）
+- 1024 float / 256 thread = 4 float/thread — 刚好一次 float4 load
+- 每个 thread 在寄存器中维护 8×8 = 64 个累加值，遍历 BK=8 步后共做 512 次 FMA

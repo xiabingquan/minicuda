@@ -1,20 +1,18 @@
-#include <torch/types.h>
 #include <cuda_runtime.h>
 #include <nvtx3/nvToolsExt.h>
-#include <vector>
-#include <utility>
+#include <torch/types.h>
 
-__global__ void cpu_large_vector_add_async_kernel(float *a, float *b, float *c, int n)
-{
+#include <utility>
+#include <vector>
+
+__global__ void cpu_large_vector_add_async_kernel(float *a, float *b, float *c, int n) {
   int i = blockDim.x * blockIdx.x + threadIdx.x;
-  if (i < n)
-  {
+  if (i < n) {
     c[i] = a[i] + b[i];
   }
 }
 
-torch::Tensor cpu_large_vector_add_async(torch::Tensor a, torch::Tensor b, int buffer_size = 1024)
-{
+torch::Tensor cpu_large_vector_add_async(torch::Tensor a, torch::Tensor b, int buffer_size = 1024) {
   nvtxRangePushA("async_total");
   TORCH_CHECK(a.device().is_cpu() && b.device().is_cpu(), "a and b must be on CPU");
   TORCH_CHECK(a.dtype() == torch::kFloat32 && b.dtype() == torch::kFloat32, "must be float32");
@@ -40,25 +38,26 @@ torch::Tensor cpu_large_vector_add_async(torch::Tensor a, torch::Tensor b, int b
   int num_loop = (n + buffer_size - 1) / buffer_size + 1;
 
   int block_size = 256, grid_size = -1;
-  for (int i = 0; i < num_loop; i++)
-  {
-    if (i != 0)
-    {
+  for (int i = 0; i < num_loop; i++) {
+    if (i != 0) {
       nvtxRangePushA("gpu_submit");
       cudaStreamSynchronize(current);
-      cudaMemcpyAsync(a_d_ptr, buffers[cur_buffer_idx], cur_real_size * sizeof(float), cudaMemcpyHostToDevice, current);
-      cudaMemcpyAsync(b_d_ptr, buffers[cur_buffer_idx] + buffer_size, cur_real_size * sizeof(float), cudaMemcpyHostToDevice, current);
+      cudaMemcpyAsync(a_d_ptr, buffers[cur_buffer_idx], cur_real_size * sizeof(float),
+                      cudaMemcpyHostToDevice, current);
+      cudaMemcpyAsync(b_d_ptr, buffers[cur_buffer_idx] + buffer_size, cur_real_size * sizeof(float),
+                      cudaMemcpyHostToDevice, current);
       grid_size = (cur_real_size + block_size - 1) / block_size;
-      cpu_large_vector_add_async_kernel<<<grid_size, block_size>>>(a_d_ptr, b_d_ptr, c_d_ptr + cur_offset, cur_real_size);
+      cpu_large_vector_add_async_kernel<<<grid_size, block_size>>>(
+          a_d_ptr, b_d_ptr, c_d_ptr + cur_offset, cur_real_size);
       cur_offset += cur_real_size;
       nvtxRangePop();
     }
-    if (i != num_loop - 1)
-    {
+    if (i != num_loop - 1) {
       nvtxRangePushA("cpu_memcpy");
       next_real_size = min(buffer_size, n - cur_offset);
       memcpy(buffers[next_buffer_idx], a_ptr + cur_offset, next_real_size * sizeof(float));
-      memcpy(buffers[next_buffer_idx] + buffer_size, b_ptr + cur_offset, next_real_size * sizeof(float));
+      memcpy(buffers[next_buffer_idx] + buffer_size, b_ptr + cur_offset,
+             next_real_size * sizeof(float));
       nvtxRangePop();
     }
     std::swap(cur_buffer_idx, next_buffer_idx);
