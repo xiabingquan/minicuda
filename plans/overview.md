@@ -192,7 +192,7 @@
 
 ### 学习目标
 
-理解现代 GPU 的核心算力单元 Tensor Core，从 WMMA API 入手编写 FP16 矩阵乘，逐步添加 double buffering、寄存器分块等优化。学习 CuTe 的 Layout/Tensor 抽象，理解 CUTLASS 的分层架构，最终能阅读和修改 CUTLASS 代码。
+理解现代 GPU 的核心算力单元 Tensor Core，从 WMMA API 入手编写 FP16 矩阵乘，逐步添加 double buffering、寄存器分块等优化。理解 CUTLASS 的分层架构，最终能阅读和修改 CUTLASS 代码。
 
 ### 知识点
 
@@ -200,7 +200,6 @@
 - FP16 运算：half 类型、FP16 累加 vs FP32 累加的精度差异。
 - Double buffering：ping-pong 缓冲隐藏 shared memory 加载延迟。
 - 寄存器 tiling：thread-level 数据复用，减少 shared memory 访问。
-- CuTe：Layout（Shape + Stride）、Tensor、TiledCopy、TiledMMA 等核心抽象。
 - CUTLASS 架构：Epilogue（后处理）、Mainloop（主循环）、TileIterator（数据搬运）。
 
 ### 实践项目
@@ -210,18 +209,47 @@
 | 1 | hgemm_wmma | 使用 WMMA API 实现 FP16 矩阵乘 | wmma fragment/load/store/mma, FP16 累加 vs FP32 累加 |
 | 2 | hgemm_register_tile | 在 WMMA 基础上添加寄存器分块 | thread-level tiling, 寄存器数据复用, 寄存器压力 |
 | 3 | hgemm_double_buffer | 在分块基础上添加双缓冲预取 | double buffering (ping-pong), 计算与 smem 加载重叠 |
-| 4 | hgemm_cute | 用 CuTe 重写 GEMM | Layout/Tensor/Atom 抽象, TiledCopy, TiledMMA |
-| 5 | cutlass_gemm_example | 直接调用 CUTLASS 3.x API 实现 GEMM | CUTLASS 分层架构, Epilogue 自定义, 编译配置 |
+| 4 | cutlass_gemm_example | 直接调用 CUTLASS 3.x API 实现 GEMM | CUTLASS 分层架构, Epilogue 自定义, 编译配置 |
 
 ### 验收标准
 
 - hgemm_wmma 精度正确（FP16 下 rtol=1e-2），性能达到 cuBLAS 的 50%+。
-- 能读懂 CuTe 的 Layout 和 Tensor 抽象，能解释 make_layout 的 Shape/Stride 含义。
 - 能编译和运行 CUTLASS example，理解其 Mainloop/Epilogue 的组织方式。
 
 ---
 
-## 课程 7: Hopper 特性 & 异步执行
+## 课程 7: CuTe — 告别手搓索引
+
+### 学习目标
+
+掌握 CuTe（CUTLASS 的核心子模块）的 Layout / Tensor 抽象，理解如何用 Shape + Stride 统一描述数据在 global、shared、register 各级内存中的排布。用 CuTe 重写 Course 2 中手搓的 SGEMM，体会抽象消除索引计算的效果。
+
+### 知识点
+
+- Layout 抽象：Shape（逻辑维度）+ Stride（步长），统一描述行优先、列优先、tiled、swizzled 等各种排布。
+- Tensor：Layout + 指针，支持 global / shared / register 各级内存。
+- TiledCopy：描述 global → shared、shared → register 的数据搬运模式，自动处理向量化和线程映射。
+- TiledMMA：描述计算模式（外积、向量化 FMA 等），与 TiledCopy 对齐。
+- make_layout / make_tensor / local_partition / local_tile：核心 API 的语义和用法。
+- 对比手搓版本：用 CuTe 重写 SGEMM 后，对比代码量和可维护性。
+
+### 实践项目
+
+| 序号 | Kernel | 概述 | 知识点 |
+|------|--------|------|--------|
+| 1 | cute_layout_basics | 用 CuTe 的 Layout API 做各种坐标变换练习 | make_layout, print_layout, coalesce, complement |
+| 2 | sgemm_cute | 用 CuTe 重写 vectorized SGEMM | TiledCopy (G→S, S→R), local_partition, 对比手搓版本 |
+| 3 | sgemm_cute_swizzle | 加入 swizzle 消除 shared memory bank conflict | Swizzle layout, compose, 对比 padding 方案 |
+
+### 验收标准
+
+- 能用 make_layout 构造 row-major、column-major、tiled 等常见 layout，理解 Shape 和 Stride 的含义。
+- sgemm_cute 精度对齐 PyTorch，性能与手搓 vectorized 版本持平。
+- 能解释 CuTe 如何通过 Layout 组合消除手动索引计算。
+
+---
+
+## 课程 8: Hopper 特性 & 异步执行
 
 ### 学习目标
 
@@ -252,7 +280,7 @@
 
 ---
 
-## 课程 8: 张量并行与通信-计算重叠
+## 课程 9: 张量并行与通信-计算重叠
 
 ### 学习目标
 
@@ -287,7 +315,7 @@
 
 ---
 
-## 课程 9: Ring Attention 与序列并行
+## 课程 10: Ring Attention 与序列并行
 
 ### 学习目标
 
@@ -321,7 +349,7 @@
 
 ---
 
-## 课程 10: Flash Attention
+## 课程 11: Flash Attention
 
 ### 学习目标
 
@@ -353,7 +381,7 @@
 
 ---
 
-## 课程 11: DeepEP
+## 课程 12: DeepEP
 
 ### 学习目标
 
@@ -385,7 +413,7 @@
 
 ---
 
-## 课程 12: DeepGEMM
+## 课程 13: DeepGEMM
 
 ### 学习目标
 

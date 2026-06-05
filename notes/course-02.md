@@ -610,11 +610,94 @@ Tiled GEMM 相比 naive 已经通过 shared memory 减少了 global memory 的�
 
 block 内的线程数也随之变化：原来一个 128×128 的输出 tile 需要 128×128 = 16384 个 thread（远超上限），现在每个 thread 算 8×8 = 64 个元素，只需要 (128/8)×(128/8) = 256 个 thread。
 
-## 两者如何配合
 
-以 BM=BN=128, BK=8, TM=TN=8 为例：
+## 数据流
 
-- Block 有 16×16 = 256 个 thread
-- 每次 tile 迭代加载 A tile（128×8 = 1024 float）和 B tile（8×128 = 1024 float）
-- 1024 float / 256 thread = 4 float/thread — 刚好一次 float4 load
-- 每个 thread 在寄存器中维护 8×8 = 64 个累加值，遍历 BK=8 步后共做 512 次 FMA
+整个 kernel 的数据搬运经历三级：Global Memory → Shared Memory → Register → Global Memory。
+
+```
+┌─ K 循环 (k += BK) ─────────────────────────────────────────────────────────────┐
+│                                                                                │
+│  1. Global → Shared (协作加载, float4)                                         │
+│     256 个 thread 合作搬运 buf_A[BM][BK] 和 buf_B[BK][BN]                      │
+│     tid 线性编号 → (row, col) 映射 → float4 一次搬 4 个 float                  │
+│     __syncthreads()                                                            │
+│                                                                                │
+│  2. Shared → Register (每个 thread 独立)                                       │
+│     ┌─ BK 循环 (bk = 0..7) ──────────────────────────────────┐                 │
+│     │  reg_A[TM] ← buf_A 的 TM 个值 (threadIdx.y 决定行范围) │                 │
+│     │  reg_B[TN] ← buf_B 的 TN 个值 (threadIdx.x 决定列范围) │                 │
+│     │  TM×TN 次 FMA: tmp[i][j] += reg_A[i] * reg_B[j]       │                 │
+│     └─────────────────────────────────────────────────────────┘                 │
+│     __syncthreads()                                                            │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────-┘
+
+3. Register → Global (写回)
+   tmp[TM][TN] → C 的对应位置
+```
+
+两个关键点：
+
+- 加载阶段的 thread-to-data 映射与计算阶段不同。加载时按线性 tid 分配（tid → 某行某列的 float4），计算时按 (threadIdx.y, threadIdx.x) 对应各自的 TM×TN 子块。
+- shared → register 阶段不用 float4，因为 shared memory 的标量读取延迟已经足够低，float4 在 shared memory 上没有 global memory 那样的带宽收益。
+
+## 索引计算
+
+### 加载阶段：tid → shared memory 位置 → global memory 地址
+
+以 buf_A[BM][BK] = [128][8] 为例，每个 thread 加载一个 float4（4 个 float）：
+
+```
+tid = threadIdx.y * blockDim.x + threadIdx.x    // 0..255
+
+// shared memory 内的位置
+a_row = tid / (BK / 4)          // 每行 BK/4=2 个 float4, 所以 tid/2 得到行号
+a_col = (tid % (BK / 4)) * 4   // 行内第几个 float4 × 4 得到列起始
+
+// 对应的 global memory 地址
+global_row = blockIdx.y * BM + a_row
+global_col = k + a_col
+A[global_row * K + global_col]  // float4 加载起始地址
+```
+
+buf_B[BK][BN] = [8][128] 同理，只是行列数不同：
+
+```
+b_row = tid / (BN / 4)          // 每行 BN/4=32 个 float4
+b_col = (tid % (BN / 4)) * 4
+global_row = k + b_row
+global_col = blockIdx.x * BN + b_col
+B[global_row * N + global_col]
+```
+
+### 计算阶段：threadIdx → 输出子块位置
+
+```
+// buf_A 中的行范围: [threadIdx.y * TM, threadIdx.y * TM + TM)
+// buf_B 中的列范围: [threadIdx.x * TN, threadIdx.x * TN + TN)
+reg_A[i] = buf_A[threadIdx.y * TM + i][bk]
+reg_B[j] = buf_B[bk][threadIdx.x * TN + j]
+```
+
+### 写回阶段：thread 坐标 → 全局 C 坐标
+
+```
+row_idx = blockIdx.y * BM + threadIdx.y * TM + i
+col_idx = blockIdx.x * BN + threadIdx.x * TN + j
+C[row_idx * N + col_idx] = tmp[i][j]
+```
+
+## 边界条件
+
+由于 M、N 不一定是 BM、BN 的整数倍，K 不一定是 BK 的整数倍，边界 block 的 thread 可能访问矩阵外的地址。
+
+加载阶段的边界判断与 tiled GEMM 的原则一致：A 和 B 独立判断，越界填 0。由于 TORCH_CHECK 保证 M、K、N 均为 4 的倍数，且 float4 的起始列也总是 4 的倍数，所以不存在"4 个 float 中部分越界"的情况 — 要么全在界内，要么全越界，直接用一个 `if` 决定即可。
+
+写回阶段用 `if (row_idx < M && col_idx < N)` 守住越界写入。
+
+## 手搓 GEMM 的痛点
+
+从 naive 到 tiled 到 vectorized，kernel 本身的数学逻辑始终是 `C[i][j] += A[i][k] * B[k][j]`，但随着优化层级加深，索引计算占据了绝大部分代码量：tid 线性化、行列拆分、global/shared/register 三级地址换算、边界条件的独立判断。这些都是纯机械的坐标变换，既容易出错又难以复用。
+
+NVIDIA 的 CuTe 库（CUTLASS 的子模块）正是为了解决这个问题：用 Layout（Shape + Stride）抽象描述数据在各级内存中的排布，用 TiledCopy / TiledMMA 描述搬运和计算模式，让编译器负责生成索引计算代码。后续课程将用 CuTe 重写这个 GEMM，对比体会两种方式的差异。
