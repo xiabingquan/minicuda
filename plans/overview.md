@@ -44,10 +44,12 @@
 
 ### 学习目标
 
-理解 GPU 内存层级（global -> shared -> register），掌握 memory coalescing 和 bank conflict 的概念，能编写使用 shared memory 的 kernel。通过矩阵转置和矩阵乘法两个经典问题，体会内存访问模式对性能的决定性影响。
+理解 GPU 内存层级（global -> shared -> register），掌握 CUDA 原生内存管理 API（含异步执行与 stream），理解 memory coalescing 和 bank conflict 的概念，能编写使用 shared memory 的 kernel。通过矩阵转置和矩阵乘法两个经典问题，体会内存访问模式对性能的决定性影响。
 
 ### 知识点
 
+- CUDA 原生内存管理：cudaMalloc / cudaMemcpy / cudaFree / cudaMemset。
+- 异步执行：cudaMallocHost (pinned memory)、cudaMemcpyAsync、cudaStream_t、H2D/kernel/D2H 流水线重叠。
 - GPU 内存层级：global memory、shared memory、register、L1/L2 cache 的容量和延迟。
 - Memory coalescing（合并访存）：连续线程访问连续地址。
 - Shared memory 与 bank conflict：32 bank 结构、padding 解决方案。
@@ -59,16 +61,20 @@
 
 | 序号 | Kernel | 概述 | 知识点 |
 |------|--------|------|--------|
-| 1 | matrix_transpose_naive | 朴素矩阵转置，直接读写 global memory | 非合并访存的性能影响, 行优先 vs 列优先 |
-| 2 | matrix_transpose_smem | 使用 shared memory 中转的矩阵转置 | shared memory 声明和使用, bank conflict 及 padding |
-| 3 | dot_product | 两个向量的点积运算 | shared memory 实现 block 内 reduce, __syncthreads 同步 |
-| 4 | gemv | 矩阵与向量相乘 | 行访问 vs 列访问模式的性能差异 |
-| 5 | sgemm_naive | 最朴素的 FP32 矩阵乘 | GEMM 基本实现逻辑, GFLOPS 计算 |
-| 6 | sgemm_tiled | 使用 shared memory 分块的矩阵乘 | 分块 (tiling) 算法, 数据复用, shared memory 容量约束 |
-| 7 | sgemm_vectorized | 使用向量化访存的分块矩阵乘 | float4 向量化加载, 寄存器分块 |
+| 1 | vector_add_raw | 不依赖 PyTorch 的纯 CUDA vector_add | cudaMalloc / cudaMemcpy / cudaFree 全流程 |
+| 2 | cpu_large_vector_add_async | CPU 输入输出, GPU 上做大向量加法, 分块 + 多 stream 流水线 | pinned memory, cudaMemcpyAsync, stream 重叠 |
+| 3 | matrix_transpose_naive | 朴素矩阵转置，直接读写 global memory | 非合并访存的性能影响, 行优先 vs 列优先 |
+| 4 | matrix_transpose_smem | 使用 shared memory 中转的矩阵转置 | shared memory 声明和使用, bank conflict 及 padding |
+| 5 | dot_product | 两个向量的点积运算 | shared memory 实现 block 内 reduce, __syncthreads 同步 |
+| 6 | gemv | 矩阵与向量相乘 | 行访问 vs 列访问模式的性能差异 |
+| 7 | sgemm_naive | 最朴素的 FP32 矩阵乘 | GEMM 基本实现逻辑, GFLOPS 计算 |
+| 8 | sgemm_tiled | 使用 shared memory 分块的矩阵乘 | 分块 (tiling) 算法, 数据复用, shared memory 容量约束 |
+| 9 | sgemm_vectorized | 使用向量化访存的分块矩阵乘 | float4 向量化加载, 寄存器分块 |
 
 ### 验收标准
 
+- 能用 cudaMalloc/cudaMemcpy/cudaFree 手动管理显存，完成完整的 H2D → kernel → D2H 流程。
+- 能解释 stream 的作用，能用 cudaMemcpyAsync + 多 stream 实现 H2D / kernel / D2H 流水线重叠。
 - 能清晰解释 global/shared/register 的区别和使用场景。
 - matrix_transpose_smem 相比 naive 版本有明显加速，能解释原因。
 - sgemm_tiled 相比 naive 版本有 5x 以上加速，能用 ncu 分析瓶颈在 compute 还是 memory。
@@ -186,7 +192,7 @@
 
 ### 学习目标
 
-理解现代 GPU 的核心算力单元 Tensor Core，从 WMMA API 入手编写 FP16 矩阵乘，逐步添加 double buffering、寄存器分块等优化。学习 CuTe 的 Layout/Tensor 抽象，理解 CUTLASS 的分层架构，最终能阅读和修改 CUTLASS 代码。
+理解现代 GPU 的核心算力单元 Tensor Core，从 WMMA API 入手编写 FP16 矩阵乘，逐步添加 double buffering、寄存器分块等优化。理解 CUTLASS 的分层架构，最终能阅读和修改 CUTLASS 代码。
 
 ### 知识点
 
@@ -194,7 +200,6 @@
 - FP16 运算：half 类型、FP16 累加 vs FP32 累加的精度差异。
 - Double buffering：ping-pong 缓冲隐藏 shared memory 加载延迟。
 - 寄存器 tiling：thread-level 数据复用，减少 shared memory 访问。
-- CuTe：Layout（Shape + Stride）、Tensor、TiledCopy、TiledMMA 等核心抽象。
 - CUTLASS 架构：Epilogue（后处理）、Mainloop（主循环）、TileIterator（数据搬运）。
 
 ### 实践项目
@@ -204,18 +209,47 @@
 | 1 | hgemm_wmma | 使用 WMMA API 实现 FP16 矩阵乘 | wmma fragment/load/store/mma, FP16 累加 vs FP32 累加 |
 | 2 | hgemm_register_tile | 在 WMMA 基础上添加寄存器分块 | thread-level tiling, 寄存器数据复用, 寄存器压力 |
 | 3 | hgemm_double_buffer | 在分块基础上添加双缓冲预取 | double buffering (ping-pong), 计算与 smem 加载重叠 |
-| 4 | hgemm_cute | 用 CuTe 重写 GEMM | Layout/Tensor/Atom 抽象, TiledCopy, TiledMMA |
-| 5 | cutlass_gemm_example | 直接调用 CUTLASS 3.x API 实现 GEMM | CUTLASS 分层架构, Epilogue 自定义, 编译配置 |
+| 4 | cutlass_gemm_example | 直接调用 CUTLASS 3.x API 实现 GEMM | CUTLASS 分层架构, Epilogue 自定义, 编译配置 |
 
 ### 验收标准
 
 - hgemm_wmma 精度正确（FP16 下 rtol=1e-2），性能达到 cuBLAS 的 50%+。
-- 能读懂 CuTe 的 Layout 和 Tensor 抽象，能解释 make_layout 的 Shape/Stride 含义。
 - 能编译和运行 CUTLASS example，理解其 Mainloop/Epilogue 的组织方式。
 
 ---
 
-## 课程 7: Hopper 特性 & 异步执行
+## 课程 7: CuTe — 告别手搓索引
+
+### 学习目标
+
+掌握 CuTe（CUTLASS 的核心子模块）的 Layout / Tensor 抽象，理解如何用 Shape + Stride 统一描述数据在 global、shared、register 各级内存中的排布。用 CuTe 重写 Course 2 中手搓的 SGEMM，体会抽象消除索引计算的效果。
+
+### 知识点
+
+- Layout 抽象：Shape（逻辑维度）+ Stride（步长），统一描述行优先、列优先、tiled、swizzled 等各种排布。
+- Tensor：Layout + 指针，支持 global / shared / register 各级内存。
+- TiledCopy：描述 global → shared、shared → register 的数据搬运模式，自动处理向量化和线程映射。
+- TiledMMA：描述计算模式（外积、向量化 FMA 等），与 TiledCopy 对齐。
+- make_layout / make_tensor / local_partition / local_tile：核心 API 的语义和用法。
+- 对比手搓版本：用 CuTe 重写 SGEMM 后，对比代码量和可维护性。
+
+### 实践项目
+
+| 序号 | Kernel | 概述 | 知识点 |
+|------|--------|------|--------|
+| 1 | cute_layout_basics | 用 CuTe 的 Layout API 做各种坐标变换练习 | make_layout, print_layout, coalesce, complement |
+| 2 | sgemm_cute | 用 CuTe 重写 vectorized SGEMM | TiledCopy (G→S, S→R), local_partition, 对比手搓版本 |
+| 3 | sgemm_cute_swizzle | 加入 swizzle 消除 shared memory bank conflict | Swizzle layout, compose, 对比 padding 方案 |
+
+### 验收标准
+
+- 能用 make_layout 构造 row-major、column-major、tiled 等常见 layout，理解 Shape 和 Stride 的含义。
+- sgemm_cute 精度对齐 PyTorch，性能与手搓 vectorized 版本持平。
+- 能解释 CuTe 如何通过 Layout 组合消除手动索引计算。
+
+---
+
+## 课程 8: Hopper 特性 & 异步执行
 
 ### 学习目标
 
@@ -246,7 +280,76 @@
 
 ---
 
-## 课程 8: Flash Attention
+## 课程 9: 张量并行与通信-计算重叠
+
+### 学习目标
+
+理解 Tensor Parallelism（TP）的两种基本切分模式（column-parallel / row-parallel），掌握 NCCL 集合通信原语的 CUDA 端使用方法，重点学习如何把 AllGather/ReduceScatter 与 GEMM 重叠以隐藏通信延迟。这是大模型分布式训练和推理的核心优化手段。
+
+### 知识点
+
+- 集合通信原语：all-reduce、all-gather、reduce-scatter、broadcast 的语义与带宽分析。
+- NCCL 基础：通信子（communicator）、stream 关联、ncclSend/ncclRecv P2P 通信。
+- TP 切分模式：column-parallel（按列切 weight，需要 AllReduce 输出）vs row-parallel（按行切 weight，需要 AllGather 输入或 ReduceScatter 输出）。
+- Sequence Parallelism：在 LayerNorm/Dropout 阶段沿 sequence 维度切分，配合 TP 形成完整切分方案。
+- 通信-计算重叠的实现路径：将大 GEMM 分块后与逐块通信交错、独立 stream 异步发起 NCCL、event 同步控制依赖。
+- SM 资源切分：通信 kernel 与计算 kernel 同时运行时如何分配 SM。
+- nsys timeline 分析：判断重叠是否真正发生、识别通信被计算 cover 的程度。
+
+### 实践项目
+
+| 序号 | Kernel | 概述 | 知识点 |
+|------|--------|------|--------|
+| 1 | nccl_basics | 单机多卡 AllReduce / AllGather / ReduceScatter 跑通 | NCCL communicator 初始化, stream 绑定, 基本性能测量 |
+| 2 | tp_column_parallel_baseline | column-parallel TP（无重叠）：先 GEMM 再 AllReduce | TP 数学切分, 完整通信开销建立 baseline |
+| 3 | tp_allgather_gemm_overlap | row-parallel TP 中 AllGather 输入与 GEMM 重叠 | 分块 AllGather + 分块 GEMM 流水线, 独立 stream 异步 NCCL |
+| 4 | tp_gemm_reducescatter_overlap | column-parallel TP 中 GEMM 与 ReduceScatter 重叠 | 输出分块, GEMM 完一块就发起 ReduceScatter, 计算/通信解耦 |
+| 5 | tp_overlap_profile | 用 nsys 对比有/无重叠版本的 timeline | 识别"通信被覆盖"的时间段, 量化重叠收益 |
+
+### 验收标准
+
+- 能解释 column-parallel 和 row-parallel TP 的 weight 切分方式及对应通信原语。
+- 能用 NCCL + CUDA stream 实现 AllGather/ReduceScatter 与 GEMM 的重叠。
+- 重叠版本相比串行版本吞吐有明显提升，能在 nsys timeline 上看到通信与 GEMM 在同一时段并行。
+- 能解释为什么 SM 资源争用会限制重叠效果，了解 NVIDIA 在新架构上提供的硬件辅助手段（如 Hopper 的 Async Transaction Barrier）。
+
+---
+
+## 课程 10: Ring Attention 与序列并行
+
+### 学习目标
+
+理解长序列训练/推理中 sequence parallelism 的必要性，掌握 Ring Attention 的核心思想：将 KV 沿 sequence 维度切分到多个 GPU，通过环形 P2P 通信让每个 Q 看到所有 KV 块，配合 online softmax 在跨 GPU 场景下完成完整 attention。
+
+### 知识点
+
+- 长序列场景下的内存瓶颈：Q/K/V 与 attention 矩阵随 sequence 长度二次方增长。
+- Sequence Parallelism：沿 sequence 维度切分 Q/K/V 到多个 GPU，每个 GPU 持有部分 sequence 段。
+- Online softmax 跨 GPU 扩展：每个 GPU 对本地 KV 块做局部 softmax 累积，结合远端 KV 块时合并 max/sum 统计量。
+- 环形通信模式：N 个 GPU 形成 ring，每轮把 KV 块传给下一个邻居，N-1 轮后每个 GPU 都看过所有 KV。
+- 通信-计算重叠：当前 KV 块计算的同时，下一个 KV 块通过 NCCL P2P send/recv 异步从邻居接收。
+- 双缓冲：两块 KV 接收 buffer 轮流使用，避免覆盖正在被计算的数据。
+- Causal masking 在 ring 模式下的处理：跳过完全在 mask 外的 KV 块。
+
+### 实践项目
+
+| 序号 | Kernel | 概述 | 知识点 |
+|------|--------|------|--------|
+| 1 | online_softmax_merge | 实现两个 partial softmax 统计量（local max + sum + output）的合并算子 | online softmax 数学推导, 跨段 softmax 等价性 |
+| 2 | ring_attention_baseline | 把 KV 完整 AllGather 到所有 GPU 后单卡 attention | sequence 切分 + 通信 baseline, 验证正确性 |
+| 3 | ring_attention_overlap | 真正的 Ring Attention：双缓冲 + P2P send/recv 与计算重叠 | 环形 P2P, 双缓冲 KV, 计算与通信重叠, 跨 GPU online softmax |
+| 4 | ring_attention_causal | 加 causal mask 的 Ring Attention | mask 在环形迭代中的位置变化, 完全 mask 块的跳过 |
+
+### 验收标准
+
+- 能从数学上推导 online softmax 在两段 partial 结果合并时的公式，并实现 online_softmax_merge 算子。
+- ring_attention_overlap 在多 GPU 上的输出与单卡 flash attention 数值一致。
+- 能用 nsys 看到 NCCL P2P send/recv 与 attention kernel 在 timeline 上的重叠。
+- 能解释 Ring Attention 相比"完整 AllGather KV"方案在显存和通信总量上的优势。
+
+---
+
+## 课程 11: Flash Attention
 
 ### 学习目标
 
@@ -278,7 +381,7 @@
 
 ---
 
-## 课程 9: DeepEP
+## 课程 12: DeepEP
 
 ### 学习目标
 
@@ -310,7 +413,7 @@
 
 ---
 
-## 课程 10: DeepGEMM
+## 课程 13: DeepGEMM
 
 ### 学习目标
 

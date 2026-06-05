@@ -1,3 +1,31 @@
-from minicuda._C import vector_add, saxpy, matrix_add, rgb_to_grayscale
+from minicuda._C import (
+    vector_add,
+    vector_add_raw,
+    cpu_large_vector_add_async,
+    saxpy,
+    matrix_add,
+    rgb_to_grayscale,
+    transpose_naive,
+    transpose_shared,
+    dot_product,
+    gemv,
+    sgemm_naive,
+    sgemm_shared,
+    sgemm_vectorized,
+)
 
-__all__ = ["vector_add", "saxpy", "matrix_add", "rgb_to_grayscale"]
+__all__ = [
+    "vector_add",
+    "vector_add_raw",
+    "cpu_large_vector_add_async",
+    "saxpy",
+    "matrix_add",
+    "rgb_to_grayscale",
+    "transpose_naive",
+    "transpose_shared",
+    "dot_product",
+    "gemv",
+    "sgemm_naive",
+    "sgemm_shared",
+    "sgemm_vectorized",
+]

@@ -3,7 +3,7 @@
 __global__ void saxpy_kernel(float* x, float* y, float a, float* z, int n) {
   int num_threads = gridDim.x * blockDim.x;
   int st = blockDim.x * blockIdx.x + threadIdx.x;
-  for(int i = st; i < n; i+=num_threads) {
+  for (int i = st; i < n; i += num_threads) {
     z[i] = a * x[i] + y[i];
   }
 }
@@ -21,9 +21,8 @@ torch::Tensor saxpy(torch::Tensor x, torch::Tensor y, float a) {
   int grid_size = 8;
   int n = x.numel();
 
-  saxpy_kernel<<<grid_size, block_size>>>(
-    x.data_ptr<float>(), y.data_ptr<float>(), a, z.data_ptr<float>(), n
-  );
+  saxpy_kernel<<<grid_size, block_size>>>(x.data_ptr<float>(), y.data_ptr<float>(), a,
+                                          z.data_ptr<float>(), n);
 
   return z;
 }
