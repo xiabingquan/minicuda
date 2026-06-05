@@ -10,6 +10,9 @@ torch::Tensor transpose_naive(torch::Tensor inp);
 torch::Tensor transpose_shared(torch::Tensor inp);
 torch::Tensor dot_product(torch::Tensor a, torch::Tensor b);
 torch::Tensor gemv(torch::Tensor A, torch::Tensor x);
+torch::Tensor sgemm_naive(torch::Tensor A, torch::Tensor B);
+torch::Tensor sgemm_shared(torch::Tensor A, torch::Tensor B);
+torch::Tensor sgemm_vectorized(torch::Tensor A, torch::Tensor B);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("vector_add", &vector_add, "Element-wise vector addition (CUDA)", py::arg("a"),
@@ -30,4 +33,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dot_product", &dot_product, "Vector dot product with shared memory reduction (CUDA)",
         py::arg("a"), py::arg("b"));
   m.def("gemv", &gemv, "Matrix-vector multiply y = A @ x (CUDA)", py::arg("A"), py::arg("x"));
+  m.def("sgemm_naive", &sgemm_naive, "Naive SGEMM C = A @ B (CUDA)", py::arg("A"), py::arg("B"));
+  m.def("sgemm_shared", &sgemm_shared, "Tiled SGEMM with shared memory (CUDA)", py::arg("A"),
+        py::arg("B"));
+  m.def("sgemm_vectorized", &sgemm_vectorized,
+        "Vectorized SGEMM with float4 + register tiling (CUDA)", py::arg("A"), py::arg("B"));
 }

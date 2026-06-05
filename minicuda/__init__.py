@@ -9,6 +9,9 @@ from minicuda._C import (
     transpose_shared,
     dot_product,
     gemv,
+    sgemm_naive,
+    sgemm_shared,
+    sgemm_vectorized,
 )
 
 __all__ = [
@@ -22,4 +25,7 @@ __all__ = [
     "transpose_shared",
     "dot_product",
     "gemv",
+    "sgemm_naive",
+    "sgemm_shared",
+    "sgemm_vectorized",
 ]
